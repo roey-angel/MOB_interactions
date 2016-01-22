@@ -1,0 +1,410 @@
+---
+title: "Calculating_MOB_interaction_networks"
+author: "Roey Angel"
+date: "13 October 2015"
+output: pdf_document
+---
+
+# Network analysis for the dataset derived from Zheng et al 2014. Biogeosciences.
+```{r general}
+library(dplyr)
+library(igraph)
+library(vegan)
+library(ggplot2)
+library(grid)
+library(scales)
+library(RColorBrewer)
+library(my.tools)
+setwd("~/Networks/Zheng")
+theme_set(theme_gray(base_size = 18, base_family = "sans"))
+```
+
+```{r functions}
+PrepOtuTax <- function(Taxonomy, tax.level = "Class", ...){
+  ## turn a .taxa file into a data frame
+  Taxonomy <- data.frame(row.names = rownames(Taxonomy), Size = Taxonomy$Size, do.call("rbind", strsplit(Taxonomy$Taxonomy, ";", fixed = TRUE))) # separate taxa levels to column with ;
+
+  Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("\\(.*\\)", "", x))) # remove bs values (irrelevant)
+  Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("\"","",x))) # remove "
+  Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("_.*$","",x))) # remove _
+  Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("uncultured", "Unclassified", x)))
+  Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("unclassified", "Unclassified", x)))
+  Taxonomy$Size <- as.numeric(levels(Taxonomy$Size)[Taxonomy$Size])
+  colnames(Taxonomy) <- c("Size","Domain","Phylum","Class","Order","Family","Genus")
+  
+  
+  group_by_(Taxonomy, tax.level) %>% dplyr::summarise(Rel.abun = sum(Size)/sum(Taxonomy$Size)*100) -> Tax.sizes
+
+  Rares <- unlist(lapply(Tax.sizes[Tax.sizes$Rel.abun <= 1, tax.level], as.character), use.names = FALSE)
+  
+  Taxonomy[, tax.level] <- factor(Taxonomy[, tax.level], levels = c(levels(Taxonomy[, tax.level]), "Rare")) # add Rare level
+  Taxonomy[which(as.character(lapply(Taxonomy[, tax.level], as.character)) %in% Rares), tax.level] <- "Rare"
+  
+  return(Taxonomy)
+}
+
+PrepNetDF <- function(graph, layout_function = layout.fruchterman.reingold, membership = FALSE) {
+  # Generate layout
+  set.seed(170922)
+  l <- layout_function(graph)
+
+  # Get groups to colour
+  # colour <- get.vertex.attribute(graph,'colour')
+  colour <- graph$colour
+  # Get node names
+  name <- get.vertex.attribute(graph, 'name')
+  # Get OTU abundances
+  # abundance <- get.vertex.attribute(graph,'abundance')
+  abundance <- graph$abundance
+  # Get edge weights
+  weight <- get.edge.attribute(graph, 'weight')
+  if (is.null(weight)) weight <- rep(1, length(get.edgelist(graph))/2)
+  direction <- factor(weight / abs(weight), levels = c(1,-1), labels = c("Positive", "Negative"))
+  
+  # Make data frame for ggplot
+  coords <- data.frame(cbind(name, colour), abundance, l, stringsAsFactors = T)
+  coords$colour <- factor(coords$colour, labels = levels(as.factor(colour)))
+
+  # Add edges
+  edges <- data.frame(get.edgelist(graph), abs(weight), direction)
+  # edges <- edges[, ]
+  edges <- do.call(rbind, apply(edges, 1, function(e) data.frame(coords[coords$name == e[1], ], coords[coords$name == e[2], ], weight = e[3], direction = e[4])))
+  edges$weight <- as.numeric(levels(edges$weight)[edges$weight])
+  edges$midX  <- (edges$X1 + edges$X1.1) / 2
+  edges$midY  <- (edges$X2 + edges$X2.1) / 2
+
+  if (membership) { # network depicting membership?
+    coords$methanotroph <- graph$methanotroph
+  }
+
+  return(list(coords, edges))
+}
+
+blankground <- function() {
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.margin = unit(0,"null"),
+        plot.margin = rep(unit(0,"null"),4),
+        axis.ticks = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank()
+  )
+}
+
+GGNetwork <- function(coords, edges, tax.level = "Class", OTU.labels = FALSE) {
+  ## Plot OTU network
+  blankground <- function() {
+    theme(panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.margin = unit(0,"null"),
+          plot.margin = rep(unit(0,"null"),4),
+          axis.ticks = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank()
+    )
+  }
+
+  p <- ggplot()  +
+    geom_segment(data = edges, aes(x = X1, y = X2, xend = X1.1, yend = X2.1, size = weight, colour = direction), alpha = 1/10) + # , colour = "#55555533"
+    geom_point(data = coords, aes(X1, X2, fill = colour), shape = 21, size = 5, alpha = 1/2) +
+    scale_x_continuous(breaks = NULL) + scale_y_continuous(breaks = NULL) +
+    blankground() +
+    guides(colour = guide_legend(title = "Direction", override.aes = list(alpha = 1/2, size = 4)), fill = guide_legend(title = tax.level), size = guide_legend(title = "Correlation strength")) +
+    scale_size(range = c(2, 10))
+  #     scale_colour_brewer(palette="Dark2")
+
+  if (OTU.labels) {
+    p + geom_text(aes(x = X1, y = X2, label = name), data = coords[coords$abundance > 100, ], alpha = 1/2) #colour="#707070"
+    #   geom_text(aes(x= X1, y= X2, label = name), data = coords[coords$abundance>100, ], position=position_dodge(0.9), alpha = 1/2) + #colour="#707070"
+    #   geom_text(aes(midX, midY,label=weight,size=10), data=edges) +
+  } else p
+}
+
+GGNetworkPoints <- function(coords, tax.level = "Class", OTU.labels = FALSE) {
+  p <- ggplot()  +
+    geom_point(data = coords, aes(X1, X2, colour = colour, size = abundance, shape = methanotroph), alpha = 4/5) +
+    scale_x_continuous(breaks = NULL) + scale_y_continuous(breaks = NULL) +
+    blankground() +
+    guides(colour = guide_legend(title = tax.level, override.aes = list(alpha = 1/2, size = 4)), fill = guide_legend(title = tax.level), size = guide_legend(title = "Rel. abundance (%)"), shape = guide_legend(title = "Methanotroph")) +
+    scale_size(range = c(2, 10)) + 
+    scale_colour_manual(values = brewer24) 
+  
+  if (OTU.labels) {
+    p + geom_text(aes(x = X1, y = X2, label = gsub("OTU_([0-9]+)", "\\1", name)), data = coords[coords$abundance > 1, ], alpha = 4/5) #colour="#707070"
+    #   geom_text(aes(x= X1, y= X2, label = name), data = coords[coords$abundance>100, ], position=position_dodge(0.9), alpha = 1/2) + #colour="#707070"
+    #   geom_text(aes(midX, midY,label=weight,size=10), data=edges) +
+  } else p
+}
+
+GGNetworkSegments <- function(edges) {
+  p <- ggplot()  +
+    geom_segment(data = edges, aes(x = X1, y = X2, xend = X1.1, yend = X2.1, size = weight, colour = direction), alpha = 1/20) + # , colour = "#55555533"
+    scale_x_continuous(breaks = NULL) + scale_y_continuous(breaks = NULL) +
+    blankground() +
+    guides(colour = guide_legend(title = "Direction", override.aes = list(alpha = 1/2, size = 4)), size = guide_legend(title = "Correlation strength")) +
+    scale_size(range = c(2, 10)) + 
+    scale_colour_manual(values = c("#377EB8", "#E41A1C"))
+}
+
+GGNetworkMethano <- function(coords, edges, tax.level = "Class", OTU.labels = FALSE) {
+  ## Plot OTU network
+  blankground <- function() {
+    theme(panel.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.margin = unit(0,"null"),
+          plot.margin = rep(unit(0,"null"),4),
+          axis.ticks = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank()
+    )
+  }
+
+  p <- ggplot()  +
+    geom_segment(data = edges, aes(x = X1, y = X2, xend = X1.1, yend = X2.1, size = weight), colour = "#377EB8", alpha = 1/15) + # , colour = "#55555533"
+    geom_point(data = coords, aes(X1, X2, colour = colour, shape = methanotroph), size = 5, alpha = 1/2) +
+    scale_x_continuous(breaks = NULL) + scale_y_continuous(breaks = NULL) +
+    blankground() +
+    guides(colour = guide_legend(title = "Direction", override.aes = list(alpha = 1/2, size = 4)), fill = guide_legend(title = tax.level), size = guide_legend(title = "Correlation strength")) +
+    scale_size(range = c(2, 10))
+  #     scale_colour_brewer(palette="Dark2")
+
+  if (OTU.labels) {
+    p + geom_text(aes(x = X1, y = X2, label = name), data = coords[coords$abundance > 100, ], alpha = 1/2) #colour="#707070"
+    #   geom_text(aes(x= X1, y= X2, label = name), data = coords[coords$abundance>100, ], position=position_dodge(0.9), alpha = 1/2) + #colour="#707070"
+    #   geom_text(aes(midX, midY,label=weight,size=10), data=edges) +
+  } else p
+}
+
+brewer24 <- c(RColorBrewer::brewer.pal(n = 8, "Set1"), RColorBrewer::brewer.pal(n = 8, "Dark2"), RColorBrewer::brewer.pal(n = 7, "Accent"), '#525252')
+```
+
+## Calculate correlations
+### Prepare data 
+
+### Trim data, remove OTUs with less than 10 reads in total and which only appear < 20% of the samples
+```{r, cache=TRUE}
+Zheng_OTU <- read.table("otuCountTable_13C-CH4_SIP.txt", header = TRUE, row.names = 1)
+Zheng_OTU <- Zheng_OTU[order(rowSums(Zheng_OTU), decreasing = TRUE), ]
+Zheng_OTU <- Zheng_OTU[rowSums(Zheng_OTU) > 10, ]
+Zheng_OTU <- Zheng_OTU[rowSums(apply(Zheng_OTU, 2, function(x) x > 0)) > (ncol(Zheng_OTU) * 0.2), ]
+# are there samples with no OTUs?
+(drop <- which(colSums(Zheng_OTU) == 0))
+if (length(drop) > 0) Zheng_OTU <- Zheng_OTU[, -drop]
+(1 - mean(vegdist(t(Zheng_OTU), method = "jaccard"))) # should be at least 20%
+OTUs.left <- as.numeric(gsub("OTU_([0-9]+)", "\\1", rownames(Zheng_OTU)))
+Zheng_OTU <- Zheng_OTU[order(OTUs.left), ]
+```
+```{r, cache=TRUE, eval=FALSE}
+write.table(Zheng_OTU, "otuCountTable_13C-CH4_SIP.abundant.txt", sep = "\t", col.names = NA)
+try(system("sed -i 's/\"\"/\"Group\"/' otuCountTable_13C-CH4_SIP.abundant.txt", intern = TRUE, ignore.stderr = TRUE))
+# try(system("sed -i 's/\"X//g' otuCountTable.abundant.txt", intern = TRUE, ignore.stderr = TRUE))
+try(system("sed -i 's/\"//g' otuCountTable_13C-CH4_SIP.abundant.txt", intern = TRUE, ignore.stderr = TRUE))
+```
+
+```{r, cache=TRUE}
+Taxonomy <- read.table("Zheng_silva.nrv119.taxonomy", header = FALSE, row.names = 1, stringsAsFactors = FALSE)
+Taxonomy <- as.data.frame(Taxonomy[which(rownames(Taxonomy) %in% rownames(Zheng_OTU)), ])
+rownames(Taxonomy) <- rownames(Zheng_OTU)
+# Taxonomy <- as.data.frame(apply(Taxonomy, 2, function(x) gsub("\"","",x))) # remove "
+Taxonomy <- data.frame(Size = rowSums(Zheng_OTU), Taxonomy = Taxonomy[, 1])
+```
+```{r, cache=TRUE, eval=FALSE}
+write.table(Taxonomy, "Zheng_silva.nrv119_13C-CH4_SIP.abundant.taxonomy", sep = "\t")
+```
+
+### Generate sparcc matrix 
+```{r, cache=TRUE, eval=FALSE, engine='bash'}
+try(system(SparCC.sh otuCountTable.noSIP.abundant.txt))
+```
+
+## Plot networks
+### Load matrices
+```{r, cache=TRUE}
+pvals.mat <- read.table("pvals_two_sided.txt",
+                        header = TRUE, sep = "\t")
+# remove OTU_id
+row.names(pvals.mat) <- pvals.mat[, 1]
+pvals.mat <- pvals.mat[, -1]
+# set p-values of 0 to a non-zero, small p-value so we can take the logarithm
+pvals.mat[pvals.mat == 0] <- 0.000000001
+# convert into significance
+sig.mat <- -1 * log10(pvals.mat) 
+# remove all edges with significance below 1
+sig.mat[sig.mat < 1] <- 0
+sig.mat <- as.matrix(sig.mat)
+
+cor.mat <- read.table("otuCountTable_13C-CH4_SIP.abundant.txt_sparcc.txt",
+                      header = TRUE, sep = "\t")
+row.names(cor.mat) <- cor.mat[, 1]
+cor.mat <- cor.mat[, -1]
+sig.cor.mat <- cor.mat
+sig.cor.mat[sig.mat == 0] <- 0
+good.pos.cor.mat <- sig.cor.mat
+good.pos.cor.mat[sig.cor.mat < 0.3] <- 0
+
+Taxonomy <- read.table("Zheng_silva.nrv119_13C-CH4_SIP.abundant.taxonomy", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+Taxonomy <- PrepOtuTax(Taxonomy, tax.level = "Class")
+```
+
+### Plot methanotrophs networks
+#### Load methanotroph names
+```{r, cache=TRUE}
+# load list of methanotrophs
+Methanotrophs <- readLines("../Methanotroph_names.txt")
+
+# List only OTUs which match methanotrophs list
+to.keep <- numeric(0)
+for (i in seq(length(Methanotrophs))) {
+  hits <- Taxonomy$Genus == Methanotrophs[i]
+  to.keep <- c(to.keep, which(hits == TRUE))
+}
+
+Methano.taxonomy <- Taxonomy[to.keep, ]
+```
+
+### Make sure only labelled methanotrophs are used
+```{r, cache=TRUE}
+otuCountTable.abundant <- as.matrix(read.table("otuCountTable_13C-CH4_SIP.abundant.txt", header = TRUE, row.names = 1))# %>% 
+  # sweep(., 1, rowSums(.), '/') * 100 
+small.samples <- which(colSums(otuCountTable.abundant) < 500)
+
+colnames(otuCountTable.abundant) %>% 
+  sub(".*\\.Fraction\\.([0-9]+)\\..*$", "\\1", .) %>%
+  as.numeric() %>%
+  sapply(., function(x) if (x < 8) {x <- "Heavy"} else {x <- "Light"}) %>%
+  as.factor() -> Fractions
+
+# for each methanotroph in the OTU table compare heavy and light fractions between gradients
+methano.pvals <- data.frame(pval = rep(0, length(to.keep)), direction = rep(0, length(to.keep)))
+gradients <- sub("Day\\.(.*)\\.Fraction.*", "\\1", colnames(otuCountTable.abundant))
+
+for (i in seq(to.keep)) {
+  direction <- 1
+  p.vect <- 1
+  for (n in seq(100)) {
+    temp.mat <- otuCountTable.abundant
+    temp.mat[1, small.samples] <- 500
+    temp.mat <- t(rrarefy(t(temp.mat), 500))
+    temp.mat[, small.samples] <- otuCountTable.abundant[, small.samples]
+
+    test.mat <- data.frame(abundance = temp.mat[to.keep[i], ])
+    test.mat$gradient <- gradients
+    test.mat$fraction <- Fractions
+    
+    mod <- aov(test.mat$abundance ~ test.mat$fraction + test.mat$gradient)
+    direction[n] <- TukeyHSD(mod)[[1]][1]
+    p.vect[n] <- TukeyHSD(mod)[[1]][4]
+  }
+  methano.pvals$direction[i] <- mean(direction)
+  methano.pvals$pval[i] <- mean(p.vect)
+}
+
+methano.pvals$adj.pval <- p.adjust(methano.pvals$pval, method = "bonferroni")
+heavy.methanotrophs <- 0
+j <- 1
+for (i in seq(nrow(methano.pvals))) {
+  if (methano.pvals$adj.pval[i] <= 0.05 & methano.pvals$direction[i] < 0) {
+    heavy.methanotrophs[j] <- to.keep[i]
+    j <- j + 1
+  }
+}
+
+Labelled.Methano.taxonomy <- Taxonomy[heavy.methanotrophs, ]
+```
+
+#### Calculate methanotrophs network of positive interactions
+```{r, cache=TRUE}
+# keep only OTU rows interacting with methanos
+to.keep <- numeric(0)
+for (i in seq(nrow(Labelled.Methano.taxonomy))) {
+  hits <- rownames(cor.mat) == rownames(Labelled.Methano.taxonomy)[i]
+  to.keep <- c(to.keep, which(hits == TRUE))
+}
+
+Methano.pvals.mat <- pvals.mat[to.keep, ]
+Methano.cor.mat <- cor.mat[to.keep, ]
+
+# set p-values of 0 to a non-zero, small p-value so we can take the logarithm
+Methano.pvals.mat[Methano.pvals.mat == 0] <- 0.000000001
+# convert into significance
+sig.mat <- -1 * log10(Methano.pvals.mat) 
+# remove all edges with significance below 1
+sig.mat[sig.mat < 1] <- 0
+sig.mat <- as.matrix(sig.mat)
+
+# Extract only OTUs with good correlations
+sig.cor.mat <- Methano.cor.mat
+sig.cor.mat[sig.mat == 0] <- 0
+good.Methano.cor.mat <- Methano.cor.mat
+good.Methano.cor.mat[Methano.cor.mat < 0.3 & Methano.cor.mat > -0.3] <- 0
+good.Methano.pos.cor.mat <- Methano.cor.mat
+good.Methano.pos.cor.mat[Methano.cor.mat < 0.3] <- 0
+good.Methano.neg.cor.mat <- Methano.cor.mat
+good.Methano.neg.cor.mat[Methano.cor.mat > -0.3] <- 0
+
+### extract remaining columns (otus) plus the methano otus from the original correlation matrix cor.mat
+good.Methano.pos.cor.mat <- good.Methano.pos.cor.mat[, colSums(good.Methano.pos.cor.mat) > 0] # this still includes methanotrophs with no associations
+# remove methanotrophs with no associations
+methano.cols <- colnames(good.Methano.pos.cor.mat) %in% rownames(Labelled.Methano.taxonomy)
+methano2remove <- intersect(names(which(colSums(good.Methano.pos.cor.mat[, methano.cols]) == 1)), names(which(rowSums(good.Methano.pos.cor.mat[, ]) == 1)))
+# methano2remove <- names(which(colSums(good.Methano.pos.cor.mat[, methano.cols]) == 1))
+if (length(methano2remove) > 0) {
+  good.Methano.pos.cor.mat <- good.Methano.pos.cor.mat[-which(rownames(good.Methano.pos.cor.mat) %in% methano2remove), -which(colnames(good.Methano.pos.cor.mat) %in% methano2remove)] 
+}
+
+OTUs2keep <- unique(c(rownames(good.Methano.pos.cor.mat), colnames(good.Methano.pos.cor.mat))) # actually `colnames(Methano.cor)` is enough because we didn't work with half matrix
+indices2keep1 <- numeric(0)
+indices2keep2 <- numeric(0)
+for (i in seq(length(OTUs2keep))) {
+  hits1 <- rownames(good.pos.cor.mat) == OTUs2keep[i]
+  indices2keep1 <- c(indices2keep1, which(hits1 == TRUE))
+  hits2 <- rownames(Taxonomy) == OTUs2keep[i]
+  indices2keep2 <- c(indices2keep2, which(hits2 == TRUE))
+}
+
+Relevant.cor.mat <- as.matrix(good.pos.cor.mat[indices2keep1, indices2keep1])
+# Relevant.pvals <- as.matrix(pvals[indices2keep, indices2keep])
+Relevant.taxa <- Taxonomy[indices2keep2, ]
+
+# mark methanotrophs
+to.keep <- numeric(0)
+for (i in seq(length(Methanotrophs))) {
+  hits <- Relevant.taxa$Genus == Methanotrophs[i]
+  to.keep <- c(to.keep, which(hits == TRUE))
+}
+Relevant.taxa$Methanotrophs <- logical(nrow(Relevant.taxa))
+Relevant.taxa$Methanotrophs[to.keep] <- TRUE
+
+# prepare matrix for calculating network
+mat4adjm <- Relevant.cor.mat
+order.id <- as.numeric(sub("OTU_([0-9]*)", "\\1", rownames(mat4adjm)))
+mat4adjm <- mat4adjm[order(order.id), order(order.id)]
+Relevant.taxa <- Relevant.taxa[order(order.id), ]
+
+# calc network
+sparcc.graph <- graph.adjacency(mat4adjm, mode = c("undirected"), weighted = TRUE, add.rownames = TRUE, diag = FALSE) # generate the network graph object
+
+# add features to graph
+sparcc.graph$colour <- as.character(lapply(Relevant.taxa$Class, as.character))
+sparcc.graph$abundance <- Relevant.taxa$Size / sum(Relevant.taxa$Size) * 100
+
+sparcc.graph$methanotroph <- Relevant.taxa$Methanotrophs
+
+c(coords, edges) := PrepNetDF(sparcc.graph, layout_function = layout.fruchterman.reingold, membership = TRUE)
+
+(p1 <- GGNetworkPoints(coords, tax.level = "Class", OTU.labels = TRUE)) 
+p1 + theme(legend.position = "none")
+(p2 <- GGNetworkSegments(edges))
+p2 + theme(legend.position = "none") 
+
+(p3 <- GGNetworkMethano(coords, edges, tax.level = "Class", OTU.labels = FALSE))
+```
